@@ -1,12 +1,18 @@
-# 周波数×BESS応答（kWh集計・換算）アプリ
+# BESS応答（AC/DC損失・DCカウント）アプリ
 
-- 観測区間のエネルギー（kWh）を、**任意の換算時間 [h]** に比例換算して表示します（既定24h）。
-- BESS定格[kW]、Droop[%]、不感帯[mHz]、出力制限[%]を指定し、出力[kW]および積算kWhを算出。
+- Droop制御の指令から **AC出力[kW]** を得て、方向別効率（η_chg, η_dis）で **DC出力[kW]** を算出します。
 
-## ローカル実行
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run app.py
-```
+- エネルギー（kWh）は DC側で積算（充電:+、放電:−）。換算時間[h]に比例換算も表示。
+
+- 参考として AC側の輸入/輸出kWh も表示。
+
+
+
+**換算式**
+
+- 放電（AC→系統へ +）：`p_dc = - p_ac / η_dis`
+
+- 充電（系統→AC -）：   `p_dc = - p_ac * η_chg` （η_chg<1 で電池に入るエネルギーは小さくなる）
+
+- `e_inc_dc = p_dc * dt[h]` を時刻で積算
+
