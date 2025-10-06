@@ -5,9 +5,9 @@
 - Excel/CSV 読み込み（openpyxl）
 - 中心周波数・Δf（Hz/mHz）
 - BESS応答：Droop[%]・不感帯[mHz]・上限/下限[%]・符号反転
-- **BESS定格出力[kW] をパラメータ化**し、出力指令[%]→出力[kW]に変換
-- **総放電量/総充電量[kWh]** を積分で算出（時間分解能はデータの time 列に依存）
-- **1日換算（24hスケール）** も表示
+- BESS定格出力[kW] をパラメータ化 → 出力[kW]に変換
+- 総放電量/総充電量[kWh] を積分で算出（観測区間合計）
+- **エネルギー換算の時間を指定**（既定24h → 任意の時間にスケーリング）
 - ダウンロードは CSV のみ（画像DLなし）
 """
 import io
@@ -17,8 +17,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="周波数×BESS応答（kWh集計）", page_icon="🔌", layout="wide")
-st.title("周波数変動とBESS応答の可視化（kWh集計付き）")
+st.set_page_config(page_title="周波数×BESS応答（kWh集計・換算）", page_icon="🔌", layout="wide")
+st.title("周波数変動とBESS応答の可視化（kWh集計＋換算）")
 st.caption("GitHub + Streamlit Cloud で動作 / 画像DLなし")
 
 TIME_CANDIDATES = [r"time", r"時間", r"時刻", r"秒", r"sec", r"s", r"min", r"hour"]
@@ -123,65 +123,56 @@ limit_neg = st.sidebar.number_input("下限出力（充電）[%]", value=-100.0,
 invert_sign = st.sidebar.checkbox("符号を反転（+を充電、-を放電）", value=False)
 
 st.sidebar.header("BESS 出力仕様")
-rated_kw = st.sidebar.number_input("BESS 定格出力 [kW]", value=1000.0, min_value=0.0, step=10.0, help="出力指令[%]をkWへ換算するために使用")
+rated_kw = st.sidebar.number_input("BESS 定格出力 [kW]", value=1000.0, min_value=0.0, step=10.0)
+
+st.sidebar.header("エネルギー換算")
+target_hours = st.sidebar.number_input("換算時間 [h]", value=24.0, min_value=0.1, step=1.0, help="観測区間のエネルギーをこの時間長に比例換算")
 
 st.sidebar.header("表示オプション")
 resample = st.sidebar.slider("ダウンサンプリング（描画点間隔）", 1, 50, 1)
 
 # ---------------- 時間軸とΔf ----------------
-# 数値時間 → 秒
 time_sec = df_clean["time_raw"].to_numpy(dtype=float) * time_scale
-# dt（秒）を計算（先頭は0）
 dt_sec = np.diff(time_sec, prepend=time_sec[0])
-# 負のdtは0に矯正（乱れ対策）
 dt_sec = np.where(dt_sec < 0, 0.0, dt_sec)
 
 delta_f_hz = df_clean["freq"] - f_center
-
-# 不感帯適用（mHz -> Hz）
 db_hz = deadband_mhz / 1000.0
 def apply_deadband(x, db):
     if abs(x) <= db:
         return 0.0
     return (x - db) if x > 0 else (x + db)
-
 delta_after_db = delta_f_hz.apply(lambda v: apply_deadband(v, db_hz))
 
-# ---------------- 出力指令[%] → kW 変換 ----------------
-cmd_pu = - (delta_after_db / f_nom) / (droop_pct / 100.0)   # per-unit
+# 出力[%]→kW
+cmd_pu = - (delta_after_db / f_nom) / (droop_pct / 100.0)
 cmd_percent = cmd_pu * 100.0
 if invert_sign:
     cmd_percent = -cmd_percent
 cmd_percent = cmd_percent.clip(lower=limit_neg, upper=limit_pos)
+power_kw = (cmd_percent / 100.0) * rated_kw
 
-power_kw = (cmd_percent / 100.0) * rated_kw  # +放電 / -充電（既定）
-
-# ---------------- エネルギー集計（kWh） ----------------
+# エネルギー集計
 dt_hour = dt_sec / 3600.0
-energy_inc_kwh = power_kw * dt_hour  # kWh（符号付き）
-
-# 放電量（+）、充電量（-の絶対値）
+energy_inc_kwh = power_kw * dt_hour
 discharge_kwh = float(np.sum(np.where(power_kw > 0, power_kw, 0.0) * dt_hour))
 charge_kwh = float(np.sum(np.where(power_kw < 0, -power_kw, 0.0) * dt_hour))
 
 duration_hours = max((time_sec[-1] - time_sec[0]) / 3600.0, 1e-9)
-scale_24h = 24.0 / duration_hours
+scale_factor = target_hours / duration_hours
 
-discharge_per_day = discharge_kwh * scale_24h
-charge_per_day = charge_kwh * scale_24h
+discharge_scaled = discharge_kwh * scale_factor
+charge_scaled = charge_kwh * scale_factor
 
 # ---------------- グラフ ----------------
-# 時間表示（相対）
 time_display = pd.to_timedelta(time_sec - time_sec[0], unit="s")
 
-# 周波数
 plot_f = pd.DataFrame({"time": time_display, "freq": df_clean["freq"]}).iloc[::resample, :]
 fig1 = go.Figure()
 fig1.add_trace(go.Scatter(x=plot_f["time"], y=plot_f["freq"], mode="lines", name="周波数"))
 fig1.add_hline(y=f_center, line=dict(width=1, dash="dot"), annotation_text="中心", annotation_position="top left")
 fig1.update_layout(title="周波数の時間変動", xaxis_title="時間", yaxis_title="周波数 [Hz]", hovermode="x unified")
 
-# Δf
 if dev_unit == "mHz":
     delta_display = delta_f_hz * 1000.0
     ylab = "偏差 Δf [mHz]"
@@ -194,21 +185,18 @@ fig2.add_trace(go.Scatter(x=plot_d["time"], y=plot_d["delta"], mode="lines", nam
 fig2.add_hline(y=0.0, line=dict(width=1, dash="dash"))
 fig2.update_layout(title=f"中心 {f_center:.5f} Hz からの偏差（Δf）", xaxis_title="時間", yaxis_title=ylab, hovermode="x unified")
 
-# 出力指令[%]（縦軸％）
 plot_cmd = pd.DataFrame({"time": time_display, "cmd": cmd_percent}).iloc[::resample, :]
 fig3 = go.Figure()
 fig3.add_trace(go.Scatter(x=plot_cmd["time"], y=plot_cmd["cmd"], mode="lines", name="出力指令[%]"))
 fig3.add_hline(y=0.0, line=dict(width=1, dash="dash"))
 fig3.update_layout(title="BESS 出力指令 [%]", xaxis_title="時間", yaxis_title="出力指令 [%]", hovermode="x unified")
 
-# 出力[kW]（参考）
 plot_pw = pd.DataFrame({"time": time_display, "p": power_kw}).iloc[::resample, :]
 fig4 = go.Figure()
 fig4.add_trace(go.Scatter(x=plot_pw["time"], y=plot_pw["p"], mode="lines", name="出力[kW]"))
 fig4.add_hline(y=0.0, line=dict(width=1, dash="dash"))
 fig4.update_layout(title="BESS 出力 [kW]", xaxis_title="時間", yaxis_title="出力 [kW]", hovermode="x unified")
 
-# 描画
 st.plotly_chart(fig1, use_container_width=True)
 st.plotly_chart(fig2, use_container_width=True)
 st.plotly_chart(fig3, use_container_width=True)
@@ -226,9 +214,9 @@ with c3:
 
 c4, c5 = st.columns(2)
 with c4:
-    st.metric("放電（1日換算, 24h）", f"{discharge_per_day:,.2f} kWh/day")
+    st.metric(f"放電（換算 {target_hours:.1f} h）", f"{discharge_scaled:,.2f} kWh/{target_hours:.0f}h")
 with c5:
-    st.metric("充電（1日換算, 24h）", f"{charge_per_day:,.2f} kWh/day")
+    st.metric(f"充電（換算 {target_hours:.1f} h）", f"{charge_scaled:,.2f} kWh/{target_hours:.0f}h")
 
 # ---------------- プレビュー＆CSV ----------------
 with st.expander("データ先頭をプレビュー（上位100行）"):
@@ -260,4 +248,4 @@ st.download_button("CSVをダウンロード（出力kW・積算kWh含む）", d
                    file_name="frequency_bess_energy.csv", mime="text/csv")
 
 st.markdown("---")
-st.caption("注意：time列の単位はサイドバーで指定してください（秒/分/時間）。積算kWhはデータの時間解像度に依存します。")
+st.caption("換算時間は観測区間エネルギーに比例させてスケーリングしています。時間列の単位設定にご注意ください。")
