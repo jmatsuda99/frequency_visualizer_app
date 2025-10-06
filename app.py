@@ -5,14 +5,14 @@
 - Excel/CSV 読み込み（openpyxl）
 - 列マッピング（時間/周波数）
 - 統計・±σバンド・ダウンサンプリング
-- ダウンロードは **CSV のみ**（画像エクスポートは提供しません）
+- 中心周波数をパラメータ入力し、偏差（Δf）を別グラフで表示（単位：Hz / mHz 切替）
+- ダウンロードは CSV のみ（画像DLなし）
 """
 import io
 import re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.io as pio
 import streamlit as st
 
 st.set_page_config(page_title="周波数可視化", page_icon="📈", layout="wide")
@@ -89,11 +89,23 @@ y = to_numeric_series(df[col_freq]).rename("freq")
 mask = ~(x.isna() | y.isna())
 df_clean = pd.DataFrame({"time": x[mask], "freq": y[mask]}).reset_index(drop=True)
 
+# ---------- 表示オプション ----------
 st.sidebar.header("表示オプション")
 resample = st.sidebar.slider("ダウンサンプリング（描画点間隔）", 1, 50, 1, help="大規模データで重い場合に間引きます")
-show_sigma = st.sidebar.checkbox("±σバンドを表示", value=True)
+show_sigma = st.sidebar.checkbox("±σバンドを表示（周波数グラフ）", value=True)
 unit = st.sidebar.selectbox("時間軸の単位", ["秒 (s)", "相対時刻 (hh:mm:ss)"])
 
+# 中心周波数設定
+st.sidebar.header("中心周波数と偏差")
+auto_center = st.sidebar.checkbox("平均から自動設定", value=True, help="チェックを外すと手動入力できます")
+if auto_center:
+    center_freq = float(df_clean["freq"].mean())
+else:
+    center_freq = st.sidebar.number_input("中心周波数 [Hz]", value=50.0, step=0.001, format="%.3f")
+
+dev_unit = st.sidebar.radio("偏差（Δf）の単位", ["mHz", "Hz"], index=0, horizontal=True)
+
+# ---------- 時間軸整形 ----------
 if unit.startswith("相対"):
     t0 = df_clean["time"].iloc[0]
     rel_sec = (df_clean["time"] - t0).to_numpy()
@@ -104,38 +116,84 @@ else:
 plot_df = pd.DataFrame({"time": time_display, "freq": df_clean["freq"]})
 plot_df = plot_df.iloc[::resample, :].reset_index(drop=True)
 
+# ---------- 統計 ----------
 mean = float(df_clean["freq"].mean())
 std = float(df_clean["freq"].std(ddof=0))
 min_v = float(df_clean["freq"].min())
 max_v = float(df_clean["freq"].max())
 count = int(len(df_clean))
 
+# 偏差（Δf）
+delta_f_hz = df_clean["freq"] - center_freq
+if dev_unit == "mHz":
+    delta_display = delta_f_hz * 1000.0
+    dev_ylabel = "偏差 Δf [mHz]"
+else:
+    delta_display = delta_f_hz
+    dev_ylabel = "偏差 Δf [Hz]"
+
+dev_stats = {
+    "center_freq": center_freq,
+    "delta_mean": float(delta_display.mean()),
+    "delta_std": float(delta_display.std(ddof=0)),
+    "delta_min": float(delta_display.min()),
+    "delta_max": float(delta_display.max()),
+}
+
+# ---------- 概要 ----------
 st.subheader("概要・統計")
-st.write(
-    f"データ点数：**{count}** / 平均：**{mean:.5f} Hz** / 標準偏差：**{std:.5f} Hz** / 最小：**{min_v:.5f} Hz** / 最大：**{max_v:.5f} Hz**"
-)
+colA, colB = st.columns(2)
+with colA:
+    st.write(
+        f"データ点数：**{count}** / 平均：**{mean:.5f} Hz** / 標準偏差：**{std:.5f} Hz** / 最小：**{min_v:.5f} Hz** / 最大：**{max_v:.5f} Hz**"
+    )
+with colB:
+    unit_label = "mHz" if dev_unit == "mHz" else "Hz"
+    st.write(
+        f"中心周波数：**{center_freq:.5f} Hz** / Δf平均：**{dev_stats['delta_mean']:.3f} {unit_label}** / Δf標準偏差：**{dev_stats['delta_std']:.3f} {unit_label}** / Δf最小：**{dev_stats['delta_min']:.3f} {unit_label}** / Δf最大：**{dev_stats['delta_max']:.3f} {unit_label}**"
+    )
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=plot_df["time"], y=plot_df["freq"], mode="lines", name="周波数",
-                         hovertemplate="時間=%{x}<br>周波数=%{y:.5f} Hz<extra></extra>"))
+# ---------- グラフ：周波数 ----------
+fig_f = go.Figure()
+fig_f.add_trace(go.Scatter(x=plot_df["time"], y=plot_df["freq"], mode="lines", name="周波数",
+                           hovertemplate="時間=%{x}<br>周波数=%{y:.5f} Hz<extra></extra>"))
+fig_f.add_hline(y=center_freq, line=dict(width=1, dash="dot"), annotation_text="中心", annotation_position="top left")
 if show_sigma:
-    fig.add_hline(y=mean, line=dict(width=1, dash="dash"), annotation_text="平均", annotation_position="top left")
-    fig.add_hrect(y0=mean-std, y1=mean+std, line_width=0, fillcolor="rgba(0,0,0,0.08)",
-                  annotation_text="±σ", annotation_position="top right")
+    fig_f.add_hline(y=mean, line=dict(width=1, dash="dash"), annotation_text="平均", annotation_position="bottom left")
+    fig_f.add_hrect(y0=mean-std, y1=mean+std, line_width=0, fillcolor="rgba(0,0,0,0.08)",
+                    annotation_text="±σ", annotation_position="top right")
 
-fig.update_layout(margin=dict(l=20, r=20, t=40, b=40), title="周波数の時間変動",
-                  xaxis_title="時間", yaxis_title="周波数 [Hz]", hovermode="x unified")
+fig_f.update_layout(margin=dict(l=20, r=20, t=40, b=40), title="周波数の時間変動",
+                    xaxis_title="時間", yaxis_title="周波数 [Hz]", hovermode="x unified")
 
-st.plotly_chart(fig, use_container_width=True)
+# ---------- グラフ：偏差（Δf） ----------
+plot_dev = pd.DataFrame({"time": time_display, "delta": delta_display})
+plot_dev = plot_dev.iloc[::resample, :].reset_index(drop=True)
+
+fig_d = go.Figure()
+fig_d.add_trace(go.Scatter(x=plot_dev["time"], y=plot_dev["delta"], mode="lines", name="偏差 Δf",
+                           hovertemplate="時間=%{x}<br>Δf=%{y:.3f}<extra></extra>"))
+fig_d.add_hline(y=0.0, line=dict(width=1, dash="dash"), annotation_text="0", annotation_position="top left")
+fig_d.update_layout(margin=dict(l=20, r=20, t=40, b=40),
+                    title=f"中心 {center_freq:.5f} Hz からの偏差（Δf）",
+                    xaxis_title="時間", yaxis_title=dev_ylabel, hovermode="x unified")
+
+# ---------- 描画 ----------
+st.plotly_chart(fig_f, use_container_width=True)
+st.plotly_chart(fig_d, use_container_width=True)
 
 with st.expander("データ先頭をプレビュー（上位100行）"):
-    st.dataframe(df_clean.head(100))
+    preview = df_clean.copy()
+    preview["delta_f(Hz)"] = (df_clean["freq"] - center_freq)
+    st.dataframe(preview.head(100))
 
-# ダウンロード（CSVのみ）
+# ダウンロード（CSVのみ：Δf列を含める）
 csv_buf = io.StringIO()
-df_clean.to_csv(csv_buf, index=False)
-st.download_button("CSVをダウンロード", data=csv_buf.getvalue().encode("utf-8"),
-                   file_name="frequency_clean.csv", mime="text/csv")
+out_df = df_clean.copy()
+out_df["delta_f(Hz)"] = (df_clean["freq"] - center_freq)
+out_df.to_csv(csv_buf, index=False)
+st.download_button("CSVをダウンロード（Δf含む）", data=csv_buf.getvalue().encode("utf-8"),
+                   file_name="frequency_with_delta.csv", mime="text/csv")
 
 st.markdown("---")
 st.caption("© 周波数可視化アプリ / 画像のダウンロード機能は提供していません。")
