@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 BESS可視化：AC/DC損失 + SoC + 表サマリ ＋ Δf時系列/ヒストグラム（±σライン）
-- 既存機能（Excel/CSV 読込、AC/DC出力、エネルギー集計、SoC、表サマリ）を維持
-- 追加：周波数偏差（Δf）の時系列＋ヒストグラムに ±1σ/2σ/3σ ライン
+- 既存機能を維持しつつ、Δfヒストグラム直下に「描画用データ（Δf配列）」のダウンロードを追加
 """
 import io
 import re
@@ -164,13 +163,24 @@ for n in (1,2,3):
     fig_hist.add_vline(x=-xline, line=dict(dash="dot"), annotation_text=f"-{n}σ = {-xline:+.6f} Hz", annotation_position="bottom left")
 fig_hist.update_layout(title="周波数偏差（Δf）ヒストグラム（±1σ/2σ/3σ）", xaxis_title="Δf [Hz]", yaxis_title="度数", bargap=0.02)
 
-# 描画順（既存 → 追加）
+# 描画
 st.plotly_chart(fig1, use_container_width=True)
 st.plotly_chart(fig2, use_container_width=True)
 st.plotly_chart(fig3, use_container_width=True)
 st.plotly_chart(fig4, use_container_width=True)
 st.plotly_chart(fig_dev, use_container_width=True)
 st.plotly_chart(fig_hist, use_container_width=True)
+
+# ▼▼ ヒストグラム描画データのダウンロード（Δf配列） ▼▼
+hist_csv = io.StringIO()
+pd.DataFrame({"delta_f[Hz]": delta_f}).to_csv(hist_csv, index=False)
+st.download_button(
+    "ヒストグラム描画用データ（Δf配列）をダウンロード",
+    data=hist_csv.getvalue().encode("utf-8"),
+    file_name="histogram_delta_f_data.csv",
+    mime="text/csv",
+    help="このCSVはヒストグラム作成に使った Δf の生データ（1列）です。"
+)
 
 # ---------------- サマリ（表 or メトリクス） ----------------
 st.subheader("エネルギー指標（AC端・DC端）")
@@ -191,7 +201,7 @@ else:
     c8.metric(f"DC 放電（換算 {target_h:.0f}h）", f"{dis_dc*scale:,.2f} kWh/{target_h:.0f}h")
     c9.metric(f"DC 充電（換算 {target_h:.0f}h）", f"{chg_dc*scale:,.2f} kWh/{target_h:.0f}h")
 
-# ---------------- CSV ----------------
+# ---------------- CSV（総合） ----------------
 csv_buf = io.StringIO()
 pd.DataFrame({
     "time[s]": tsec, "freq[Hz]": dfc["freq"],
@@ -204,4 +214,4 @@ pd.DataFrame({
 st.download_button("CSVダウンロード（AC/DC・SoC・Δf）", data=csv_buf.getvalue().encode("utf-8"),
                    file_name="bess_acdc_soc_with_deltaf.csv", mime="text/csv")
 
-st.caption("Δfは『中心周波数』入力を基準に算出。σは標本標準偏差（ddof=1）。")
+st.caption("Δfは『中心周波数』入力を基準に算出。σは標本標準偏差（ddof=1）。ヒストグラム直下のCSVはグラフ描画に使ったΔfそのものです。")
