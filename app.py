@@ -207,6 +207,14 @@ if db_mode == "SOC_STEPS" and len(db_outputs_pct)==(len(soc_band_edges)+1):
     p_ac = p_ac_seq; p_dc = p_dc_seq
     e_ac = e_ac_seq; e_dc = e_dc_seq
     soc = soc_seq
+# ==== KPIを再計算（DB内動作が有効な場合も反映） ====
+e_ac = p_ac * dth
+e_dc = p_dc * dth
+export_ac = float(np.sum(np.where(p_ac > 0,  p_ac * dth, 0.0)))
+import_ac = float(np.sum(np.where(p_ac < 0, -p_ac * dth, 0.0)))
+dis_dc    = float(np.sum(np.where(p_dc > 0,  p_dc * dth, 0.0)))
+chg_dc    = float(np.sum(np.where(p_dc < 0, -p_dc * dth, 0.0)))
+    
 
 # ---------------- 既存グラフ（周波数, 出力, SoC） ----------------
 td = pd.to_timedelta(tsec-tsec[0], unit="s")
