@@ -87,6 +87,39 @@ rated = st.sidebar.number_input("BESS定格出力 [kW]", value=1000.0, step=10.0
 eta_chg = st.sidebar.number_input("充電効率（AC→DC）[%]", value=96.0, step=0.1)
 eta_dis = st.sidebar.number_input("放電効率（DC→AC）[%]", value=96.0, step=0.1)
 
+# ==== Deadband内動作モード（A/B） ====
+st.sidebar.subheader("Deadband内の動作")
+db_mode = st.sidebar.selectbox(
+    "Deadband Mode",
+    options=["HOLD", "SOC_STEPS"],
+    index=0,
+    help="HOLD: DB内は0%。SOC_STEPS: SoC帯域ごとに固定出力（% of rated）。"
+)
+
+# 帯域境界（降順, %）と各帯域の固定出力（% of rated）
+soc_band_edges_str = st.sidebar.text_input(
+    "SoC帯域の境界（%）降順、カンマ区切り",
+    value="90,75,50,30"
+)
+db_outputs_pct_str = st.sidebar.text_input(
+    "各帯域のDB内出力（% of rated）カンマ区切り",
+    value="9,7,0,-7,-9"
+)
+
+def _parse_csv_floats(s):
+    if not s.strip():
+        return []
+    return [float(x.strip()) for x in s.split(",") if x.strip()]
+
+soc_band_edges = _parse_csv_floats(soc_band_edges_str)
+db_outputs_pct = _parse_csv_floats(db_outputs_pct_str)
+
+# 妥当性チェック（軽微）
+if sorted(soc_band_edges, reverse=True) != soc_band_edges:
+    st.warning("SoC帯域境界は降順（大→小）で入力してください。")
+if len(db_outputs_pct) != (len(soc_band_edges) + 1):
+    st.warning("帯域数（境界+1）とDB内出力の個数が一致していません。")
+
 st.sidebar.header("エネルギー換算 & SoC")
 target_h = st.sidebar.number_input("換算時間 [h]", value=24.0, step=1.0)
 capacity = st.sidebar.number_input("BESS 容量 [kWh]", value=2000.0, min_value=0.1, step=10.0)
@@ -95,7 +128,17 @@ clip_soc = st.sidebar.checkbox("SoC を 0–100% にクリップ", value=True)
 
 view_mode = st.sidebar.radio("サマリ表示モード", ["表（おすすめ）", "メトリクス"], horizontal=True)
 
-# ---------------- 計算（BESS制御） ----------------
+# ---------------- 
+def compute_db_power_pct_soc_steps(soc_pct, edges_desc, outputs_pct_desc):
+    """SoC[%]に基づく段階ステップ出力（% of rated）を返す。境界は降順リスト。"""
+    prev = 100.0
+    for i, edge in enumerate(edges_desc):
+        if soc_pct <= prev and soc_pct > edge:
+            return outputs_pct_desc[i]
+        prev = edge
+    return outputs_pct_desc[-1] if outputs_pct_desc else 0.0
+
+# 計算（BESS制御） ----------------
 tsec = dfc["time"].to_numpy(float); dt = np.diff(tsec, prepend=tsec[0]); dt = np.where(dt<0, 0.0, dt); dth = dt/3600.0
 delta = dfc["freq"] - f_ctr; db = db_mhz/1000.0
 delta_db = delta.apply(lambda v: 0.0 if abs(v)<=db else (v - np.sign(v)*db))
@@ -120,6 +163,50 @@ e_batt_inc = - e_dc
 soc = np.empty_like(tsec); soc[0]=soc0
 for i in range(1,len(soc)): soc[i] = soc[i-1] + (e_batt_inc[i]/capacity)*100.0
 if clip_soc: soc = np.clip(soc, 0.0, 100.0)
+
+# ==== SOC_STEPS モードのときは、DB内をSoC帯域の固定出力で逐次再計算 ====
+if db_mode == "SOC_STEPS" and len(db_outputs_pct)==(len(soc_band_edges)+1):
+    droop_cmd_pct_vec = cmd.copy()
+    cmd_seq = np.zeros_like(droop_cmd_pct_vec)
+    p_ac_seq = np.zeros_like(droop_cmd_pct_vec, dtype=float)
+    p_dc_seq = np.zeros_like(droop_cmd_pct_vec, dtype=float)
+    e_ac_seq = np.zeros_like(droop_cmd_pct_vec, dtype=float)
+    e_dc_seq = np.zeros_like(droop_cmd_pct_vec, dtype=float)
+    soc_seq = np.empty_like(tsec, dtype=float); soc_seq[0] = soc0
+
+    db_hz = db_mhz/1000.0
+
+    for i in range(len(tsec)):
+        df_i = (dfc["freq"].iat[i] - f_ctr)
+        in_db = (abs(df_i) <= db_hz)
+        if in_db:
+            out_pct = compute_db_power_pct_soc_steps(soc_seq[i], soc_band_edges, db_outputs_pct)
+        else:
+            out_pct = droop_cmd_pct_vec[i]
+
+        p_ac_i = (out_pct/100.0) * rated
+        if p_ac_i >= 0:
+            p_dc_i = p_ac_i / (eta_dis/100.0)
+        else:
+            p_dc_i = p_ac_i * (eta_chg/100.0)
+
+        e_ac_i = p_ac_i * dth[i]
+        e_dc_i = p_dc_i * dth[i]
+
+        cmd_seq[i] = out_pct
+        p_ac_seq[i] = p_ac_i
+        p_dc_seq[i] = p_dc_i
+        e_ac_seq[i] = e_ac_i
+        e_dc_seq[i] = e_dc_i
+
+        if i < len(tsec)-1:
+            soc_next = soc_seq[i] + (-e_dc_i/ capacity)*100.0
+            soc_seq[i+1] = np.clip(soc_next, 0.0, 100.0) if clip_soc else soc_next
+
+    cmd = cmd_seq
+    p_ac = p_ac_seq; p_dc = p_dc_seq
+    e_ac = e_ac_seq; e_dc = e_dc_seq
+    soc = soc_seq
 
 # ---------------- 既存グラフ（周波数, 出力, SoC） ----------------
 td = pd.to_timedelta(tsec-tsec[0], unit="s")
